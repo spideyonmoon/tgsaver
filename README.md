@@ -76,12 +76,13 @@ The container runs as `1000:1000` like the rest of the stack. It needs no ports
 because it polls Telegram. It also shows up in FileBrowser under `telegram/`.
 
 Optional env:
-- `PARALLEL`: connections per file, default `4`. Files of 20 MB or more are
-  split into that many byte ranges downloaded at once. A single stream is capped
-  by round-trip time (~3–4 MB/s), so this is the speed knob. `1` turns it off.
-  Going past ~8 makes Telegram more likely to slow you down. If Telegram ever says
-  "wait" (FloodWait), every request pauses for the full time, and the connection count
-  halves (4 → 2 → 1) until the container restarts. `/status` shows the current value.
+- `WZGRAM_DL_POOL_PREMIUM` × `WZGRAM_DL_WORKERS_PREMIUM`: the speed knobs, default
+  `4` × `2`. Downloads use [wzgram](https://github.com/rjriajul/wzgram) (a Pyrogram
+  fork, pinned in `requirements.txt`). It splits each file across a pool of reused
+  media connections, each with several requests in flight. wzgram's own default is
+  6 × 4 with no pacing, which is more likely to make Telegram slow you down. Raise
+  these slowly. If Telegram ever says "wait" (FloodWait), every request pauses for the
+  full time, and the status message says so.
 - `DELAY_SECONDS`: pause between files, default `2`.
 - `MAX_BATCH`: most posts per job, default `2000`.
 

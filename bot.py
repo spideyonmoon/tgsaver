@@ -20,11 +20,15 @@ import mimetypes
 import os
 import re
 import shutil
+import struct
 import time
 from dataclasses import dataclass, field
 
+# wzgram (a Pyrogram fork) answers to the `pyrogram` name; it downloads each file over a
+# pool of reused media connections with several requests in flight, which is where the
+# speed comes from. `Flood` covers both FloodWait and FloodPremiumWait.
 from pyrogram import Client, filters, idle
-from pyrogram.errors import FloodWait, MessageNotModified, RPCError
+from pyrogram.errors import Flood, MessageNotModified, RPCError
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 
@@ -47,18 +51,16 @@ def clean_session_string(raw):
 
 
 def session_string_problem(s):
-    """None if it looks like a pyrofork/pyrogram session string, else a human explanation."""
+    """None if it could be a session string (wzgram 'WZ_…' or Pyrogram), else an explanation.
+    The library does the real decoding; this only catches obvious paste mistakes early."""
     if not s:
         return "SESSION_STRING is empty."
     if not re.fullmatch(r"[A-Za-z0-9_-]+", s):
         bad = sorted(set(re.sub(r"[A-Za-z0-9_-]", "", s)))
         return f"SESSION_STRING contains characters a session string never has: {''.join(bad)!r}."
-    if len(s) in (362, 351, 356):
-        return None
     if s.startswith("1") and len(s) == 353:
-        return "SESSION_STRING looks like a Telethon session; this bot needs a Pyrogram one from gen_session.py."
-    return (f"SESSION_STRING is {len(s)} characters; a Pyrogram session is 362. It was probably cut off "
-            "or wrapped when copied. Regenerate with gen_session.py and paste it as one line.")
+        return "SESSION_STRING looks like a Telethon session; this bot needs one from gen_session.py."
+    return None
 
 
 SESSION_STRING = clean_session_string(os.environ["SESSION_STRING"])
@@ -68,9 +70,11 @@ INCOMPLETE_DIR = os.path.join(DOWNLOAD_DIR, ".incomplete")
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "2"))  # pause between files
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "2000"))
 EDIT_EVERY = 6  # seconds between progress edits (Telegram rate-limits edits)
-PARALLEL = max(1, int(os.environ.get("PARALLEL", "4")))  # connections per file; 1 = off
-PARALLEL_MIN_MB = 20  # smaller files use a single stream
-CHUNK = 1024 * 1024   # Telegram/pyrofork download chunk size
+# wzgram's download pool for Premium accounts: connections x requests in flight each.
+# Its own default is 6 x 4 = 24 with no pacing; start gentler. Override in the compose env.
+os.environ.setdefault("WZGRAM_DL_POOL_PREMIUM", "4")
+os.environ.setdefault("WZGRAM_DL_WORKERS_PREMIUM", "2")
+DL_POOL = f"{os.environ['WZGRAM_DL_POOL_PREMIUM']} x {os.environ['WZGRAM_DL_WORKERS_PREMIUM']}"
 
 # ── link parsing ────────────────────────────────────────────────────────────
 # t.me/c/<id>/<msg>, t.me/c/<id>/<topic>/<msg>, t.me/<user>/<msg>, t.me/<user>/<topic>/<msg>
@@ -180,7 +184,7 @@ async def edit(job, text, force=False):
         await job.status.edit_text(text)
     except MessageNotModified:
         pass
-    except FloodWait as e:
+    except Flood as e:
         job.last_edit = now + e.value  # back off, don't block the download
     except Exception as e:  # never let a status edit abort a download
         log.warning("status edit failed: %s", e)
@@ -188,7 +192,7 @@ async def edit(job, text, force=False):
 
 # One shared cooldown for the user account: when Telegram says "wait N seconds" to any
 # request, every request (all connections, the next file, the next batch) waits it out.
-# pyrofork already sleeps through waits of <=30s inside a request; longer ones land here.
+# wzgram already sleeps through short waits (<=30s) inside a download; longer ones land here.
 FLOOD_UNTIL = [0.0]
 
 
@@ -214,7 +218,7 @@ async def with_floodwait(fn, *args, _job=None, **kwargs):
         await respect_flood()
         try:
             return await fn(*args, **kwargs)
-        except FloodWait as e:
+        except Flood as e:
             await flood_wait(e.value, _job, getattr(fn, "__name__", "request"))
     await respect_flood()
     return await fn(*args, **kwargs)
@@ -225,13 +229,10 @@ class Saver:
     def __init__(self):
         self.bot = Client("tgsaver-bot", api_id=API_ID, api_hash=API_HASH,
                           bot_token=BOT_TOKEN, in_memory=True)
-        # pyrofork allows only one file transfer at a time unless told otherwise.
         self.user = Client("tgsaver-user", api_id=API_ID, api_hash=API_HASH,
-                           session_string=SESSION_STRING, in_memory=True,
-                           max_concurrent_transmissions=PARALLEL)
+                           session_string=SESSION_STRING, in_memory=True)
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
         self.current: Job | None = None
-        self.parallel = PARALLEL  # halved after each FloodWait during a parallel download
 
         owner = filters.private & filters.user(list(OWNER_IDS))
         self.bot.add_handler(MessageHandler(self.on_start, owner & filters.command(["start", "help"])))
@@ -247,7 +248,7 @@ class Saver:
         job = self.current
         busy = f"Working on {job.total} message(s) from {job.chat_ref}" if job else "Idle"
         await m.reply_text(f"{busy}\nQueued jobs: {self.queue.qsize()}\n"
-                           f"Connections per file: {self.parallel} (of {PARALLEL})\n"
+                           f"Download pool: {DL_POOL} (connections x requests)\n"
                            f"Free disk: {human(shutil.disk_usage(DOWNLOAD_DIR).free)}")
 
     async def on_cancel(self, _, m: Message):
@@ -367,31 +368,19 @@ class Saver:
         started = time.monotonic()
         await edit(job, f"{pos}\n⬇️ {name}\n0 / {human(size)}", force=True)
 
-        async def report(current, total):
+        async def progress(current, total):
+            if job.cancelled:
+                self.user.stop_transmission()  # wzgram aborts the transfer and returns None
             elapsed = max(time.monotonic() - started, 0.1)
             speed = current / elapsed
             left = (total - current) / speed if speed else 0
             await edit(job, f"{pos}\n⬇️ {name}\n{human(current)} / {human(total)} · "
                             f"{human(speed)}/s · ETA {eta(left)}")
 
-        async def progress(current, total):
-            if job.cancelled:
-                self.user.stop_transmission()
-            await report(current, total)
-
         os.makedirs(INCOMPLETE_DIR, exist_ok=True)
-        path = None
-        if self.parallel > 1 and size >= PARALLEL_MIN_MB * CHUNK:
-            if await self.parallel_download(job, m, size, tmp_path, report):
-                path = tmp_path
-            elif os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            if not path and not job.cancelled:
-                log.warning("parallel download of %s/%s failed, falling back to single stream",
-                            m.chat.id, m.id)
-        if not path and not job.cancelled:
-            path = await with_floodwait(self.user.download_media, m, file_name=tmp_path,
-                                        progress=progress, _job=job)
+        # wzgram spreads the file across its pool of media connections by itself.
+        path = await with_floodwait(self.user.download_media, m, file_name=tmp_path,
+                                    progress=progress, _job=job)
         if not path or job.cancelled:
             if path and os.path.exists(path):
                 os.remove(path)
@@ -410,61 +399,6 @@ class Saver:
         log.info("saved %s", final_path)
         return True
 
-    async def parallel_download(self, job, m, size, path, report):
-        """Download one file as self.parallel byte ranges at once, each over its own connection.
-
-        pyrofork fetches 1 MB per request and waits for each reply, so a single stream
-        is capped by round-trip time, not bandwidth. Each range here is still fetched
-        with pyrofork's own stream_media (same auth/CDN/FloodWait handling), written
-        straight into its place in a pre-sized file. True only if every byte arrived.
-        """
-        chunks = -(-size // CHUNK)
-        per = -(-chunks // min(self.parallel, chunks))
-        ranges = [(start, min(per, chunks - start)) for start in range(0, chunks, per)]
-        done = [0] * len(ranges)  # chunks finished in each range
-        got = [0]                 # bytes written so far, for progress
-        current = [m]             # refreshed if the file reference goes stale
-
-        with open(path, "wb") as f:
-            f.truncate(size)
-
-        async def segment(i, start, count):
-            with open(path, "r+b") as f:
-                for attempt in range(6):
-                    remaining = count - done[i]
-                    if remaining <= 0 or job.cancelled:
-                        return
-                    await respect_flood()
-                    f.seek((start + done[i]) * CHUNK)
-                    try:
-                        async for chunk in self.user.stream_media(
-                                current[0], offset=start + done[i], limit=remaining):
-                            if job.cancelled:
-                                return
-                            f.write(chunk)
-                            done[i] += 1
-                            got[0] += len(chunk)
-                            await report(got[0], size)
-                    except FloodWait as e:
-                        if self.parallel > 1:
-                            self.parallel = max(1, self.parallel // 2)
-                            log.warning("FloodWait during parallel download: next files use %s connection(s)",
-                                        self.parallel)
-                        await flood_wait(e.value, job, f"range {i}")
-                        continue
-                    if done[i] < count:
-                        # pyrofork logs network errors and just ends the stream; retry the rest.
-                        log.warning("range %s of %s/%s stopped at %s/%s, retrying",
-                                    i, m.chat.id, m.id, done[i], count)
-                        await asyncio.sleep(2 * (attempt + 1))
-                        try:
-                            current[0] = await self.user.get_messages(m.chat.id, m.id)
-                        except Exception as e:
-                            log.warning("refetching message failed: %s", e)
-
-        await asyncio.gather(*(segment(i, s, c) for i, (s, c) in enumerate(ranges)))
-        return not job.cancelled and all(done[i] == c for i, (_, c) in enumerate(ranges))
-
     async def prepare_dirs(self):
         # The rclone container creates /data/telegram owned by 1000:1000; wait for it if needed.
         while True:
@@ -479,7 +413,13 @@ class Saver:
 
     async def main(self):
         await self.prepare_dirs()
-        await self.user.start()
+        try:
+            await self.user.start()
+        except (ValueError, struct.error) as e:
+            log.error("SESSION_STRING was rejected (%s). Regenerate it with gen_session.py and paste "
+                      "it as one line.", e)
+            await asyncio.sleep(60)  # don't spin in a tight restart loop
+            raise SystemExit(1)
         me = await self.user.get_me()
         log.info("user client: %s (%s)", me.first_name, me.id)
         await self.bot.start()

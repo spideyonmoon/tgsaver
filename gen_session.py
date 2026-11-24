@@ -23,7 +23,7 @@ async def main():
     out = os.path.abspath("session_string.txt")
     with open(out, "w") as f:
         f.write(session)
-    print(f"\nSession string ({len(session)} chars, should be 362) saved to:\n  {out}\n"
+    print(f"\nSession string ({len(session)} chars, one line) saved to:\n  {out}\n"
           "Open that file, copy the single line into Dokploy as TG_SESSION_STRING, then delete the file.\n")
 
 
