@@ -19,7 +19,12 @@ async def main():
     api_id = int(os.environ.get("API_ID") or input("API_ID: ").strip())
     api_hash = os.environ.get("API_HASH") or input("API_HASH: ").strip()
     async with Client("gen", api_id=api_id, api_hash=api_hash, in_memory=True) as app:
-        print("\nSESSION_STRING:\n" + await app.export_session_string() + "\n")
+        session = await app.export_session_string()
+    out = os.path.abspath("session_string.txt")
+    with open(out, "w") as f:
+        f.write(session)
+    print(f"\nSession string ({len(session)} chars, should be 362) saved to:\n  {out}\n"
+          "Open that file, copy the single line into Dokploy as TG_SESSION_STRING, then delete the file.\n")
 
 
 if __name__ == "__main__":

@@ -41,7 +41,9 @@ Only the IDs in `TG_OWNER_ID` can use the bot. Everyone else is ignored.
    docker compose run --rm -it tgsaver python gen_session.py
    ```
    (or locally: `pip install -r requirements.txt && python gen_session.py`).
-   It asks for your phone and the login code and prints the string. **Anyone
+   It asks for your phone and the login code and saves the string (362 characters,
+   one line) to `session_string.txt`. Copy it from that file, not from the terminal,
+   and delete the file afterwards. **Anyone
    holding this string has full access to your Telegram account.** Keep it only in
    Dokploy's Environment tab.
 5. Add to Dokploy's Environment tab:

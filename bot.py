@@ -36,7 +36,32 @@ log = logging.getLogger("tgsaver")
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+
+
+def clean_session_string(raw):
+    """Undo common copy/paste damage: line wraps, spaces, quotes, the gen_session label."""
+    s = re.sub(r"\s+", "", raw).strip("'\"")
+    if ":" in s:  # e.g. "SESSION_STRING:AbC..." copied together with the label
+        s = s.rsplit(":", 1)[1]
+    return s
+
+
+def session_string_problem(s):
+    """None if it looks like a pyrofork/pyrogram session string, else a human explanation."""
+    if not s:
+        return "SESSION_STRING is empty."
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", s):
+        bad = sorted(set(re.sub(r"[A-Za-z0-9_-]", "", s)))
+        return f"SESSION_STRING contains characters a session string never has: {''.join(bad)!r}."
+    if len(s) in (362, 351, 356):
+        return None
+    if s.startswith("1") and len(s) == 353:
+        return "SESSION_STRING looks like a Telethon session; this bot needs a Pyrogram one from gen_session.py."
+    return (f"SESSION_STRING is {len(s)} characters; a Pyrogram session is 362. It was probably cut off "
+            "or wrapped when copied. Regenerate with gen_session.py and paste it as one line.")
+
+
+SESSION_STRING = clean_session_string(os.environ["SESSION_STRING"])
 OWNER_IDS = {int(x) for x in os.environ["OWNER_ID"].replace(",", " ").split()}
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/data/telegram")
 INCOMPLETE_DIR = os.path.join(DOWNLOAD_DIR, ".incomplete")
@@ -369,6 +394,11 @@ class Saver:
 
 
 async def _amain():
+    problem = session_string_problem(SESSION_STRING)
+    if problem:
+        log.error(problem)
+        await asyncio.sleep(60)  # don't spin in a tight restart loop
+        raise SystemExit(1)
     # Build the clients inside the running loop so pyrogram binds to it.
     await Saver().main()
 
