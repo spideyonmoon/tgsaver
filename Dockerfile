@@ -1,11 +1,13 @@
-FROM python:3.10-slim
-RUN apt-get update && apt-get install -y git curl ffmpeg python3-pip wget bash && apt-get clean && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
+
 COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-RUN pip3 install wheel
-RUN pip3 install --no-cache-dir -U -r requirements.txt
-COPY . .
-EXPOSE 5000
+COPY bot.py gen_session.py ./
 
-CMD flask run -h 0.0.0.0 -p 5000 & python3 main.py
+# Same uid/gid as the rest of the stack so FileBrowser and rclone can manage the files.
+USER 1000:1000
+CMD ["python", "bot.py"]

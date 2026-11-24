@@ -1,204 +1,127 @@
-<h1 align="center">
-  Save Restricted Content Bot v3
-</h1>
+# tgsaver
 
-The Save Restricted Content Bot is a stable Telegram bot developed by devgagan and TEAM SPY. It enables users to forward (no forward tag) messages from Telegram channels and groups, offering features such as custom thumbnail support and the ability to upload files up to 4GB. Additionally, the bot supports downloading videos from platforms like YouTube, Instagram, and Facebook, along with over 100 other sites(which ytdlp supports)
+A one-person Telegram bot, stripped down from Save-Restricted-Content-Bot-v3.
+You send it a `t.me` link and it downloads that post's media with **your own
+account**, which works on no-forward chats too, into `/data/telegram/<chat title>/` on the
+shared `data` volume. The existing rclone container then moves it to
+`gdrive:Telegram`.
 
-[Telegram](https://t.me/restbots) | [See Recent Updates](https://github.com/devgaganin/Save-Restricted-Content-Bot-V2/tree/v3#updates)
+```
+you ──link──▶ bot ──(your account)──▶ /data/telegram/.incomplete/…   (partial)
+                                       └─ moved when complete ─▶ /data/telegram/<chat>/<msg id> - <name>.mp4
+rclone (every 5 min) ── rclone move ──▶ gdrive:Telegram/<chat>/…
+```
 
-### Star the repo it motivate us to update new features
-Please do start and max fork thanks 
+## Using it
 
-## 📚 About This Branch
-- This branch is based on `Pyrogram V2` offering enhanced stability and a forced login feature. User are not forced to login in bot for public channels but for public groups and private channel they have to do login.
-- for detailed features scroll down to features section
+Send the bot (one job per line):
 
----
+| Message | Does |
+|---|---|
+| `https://t.me/c/1234567890/45` | that one post |
+| `https://t.me/c/1234567890/45 20` | 20 posts starting at 45 |
+| `https://t.me/c/1234567890/45 https://t.me/c/1234567890/80` | posts 45–80 |
+| `https://t.me/somechannel/12` | public channels and topic links work too |
+| `/status` | current job, queue, free disk |
+| `/cancel` | stop current job and clear the queue |
 
-## 🔧 Features
-- Extract content from both public and private channels/groups.
-- Custom bot functionality added use `/setbot`
-- 128 bit encryption for data saving use @v3saverbot on telegram to generate `MASTER_KEY`, `IV_KEY`
-- Rename and forward content to other channels or users.
-- extract restricted content from other bots how to use format link like `https://botusername(without @)/message_id(get it from plus messenger)`
-- `/login` method along with `session` based login
-- Custom captions and thumbnails.
-- Auto-remove default video thumbnails.
-- Delete or replace words in filenames and captions.
-- Auto-pin messages if enabled.
-- download yt/insta/Twitter/fb ect normal ytdlp supported sites that supports best format
-- Login via phone number.
-- **Supports 4GB file uploads**: The bot can handle large file uploads, up to 4GB in size.
-- file splitter if not premium string
-- **Enhanced Timer**: Distinct timers for free and paid users to limit usage and improve service.
-- **Improved Looping**: Optimized looping for processing multiple files or links, reducing delays and enhancing performance.
-- **Premium Access**: Premium users enjoy faster processing speeds and priority queue management.
-- ~~ads setup shorlink ads token system~~
-- ~~fast uploader via `SpyLib` using Telethon modules and `mautrix bridge repo`~~ 
-- Directly upload to `topic` in any topic enabled group
-- real time download and uplaod progress, support chats, text , audio, video , video note sticker everything
+Posts without media are skipped. Files already sitting in the folder are skipped.
+Files are named `<msg id> - <original name or first caption line>.<ext>` so
+they sort in post order on Drive.
 
-  
-## ⚡ Commands
+Only the IDs in `TG_OWNER_ID` can use the bot. Everyone else is ignored.
 
-- **`start`**: 🚀 Start the bot.
-- **`batch`**: 🫠 Extract in bulk.
-- **`login`**: 🔑 Get into the bot.
-- **`single`**: Process single link.
-- **`setbot`**: add your custome bot.
-- **`logout`**: 🚪 Get out of the bot.
-- **`adl`**: 👻 Download audio from 30+ sites.
-- **`dl`**: 💀 Download videos from 30+ sites.
-- **`transfer`**: 💘 Gift premium to others.
-- **`status`**: ⌛ Get your plan details.
-- **`add`**: ➕ Add user to premium.
-- **`rem`**: ➖ Remove user from premium.
-- **`rembot`**: remove your custome bot.
-- **`session`**: 🧵 Generate Pyrogramv2 session.
-- **`settings`**: ⚙️ Personalize settings.
-- **`stats`**: 📊 Get stats of the bot.
-- **`plan`**: 🗓️ Check our premium plans.
-- **`terms`**: 🥺 Terms and conditions.
-- **`help`**: ❓ Help if you're new.
-- **`cancel`**: 🚫 Cancel batch process.
+## One-time setup
 
-
-## ⚙️ Required Variables
-
-<details>
-<summary><b>Click to view required variables</b></summary>
-
-To run the bot, you'll need to configure a few sensitive variables. Here's how to set them up securely:
-
-- **`API_ID`**: Your API ID from [telegram.org](https://my.telegram.org/auth).
-- **`API_HASH`**: Your API Hash from [telegram.org](https://my.telegram.org/auth).
-- **`BOT_TOKEN`**: Get your bot token from [@BotFather](https://t.me/botfather).
-- **`OWNER_ID`**: Use [@missrose_bot](https://t.me/missrose_bot) to get your user ID by sending `/info`.
-- **`CHANNEL_ID`**: The ID of the channel for forced subscription.
-- **`LOG_GROUP`**: A group or channel where the bot logs messages. Forward a message to [@userinfobot](https://t.me/userinfobot) to get your channel/group ID.
-- **`MONGO_DB`**: A MongoDB URL for storing session data (recommended for security).
-  
-### Additional Configuration Options:
-- **`STRING`**: (Optional) Add your **premium account session string** here to allow 4GB file uploads. This is **optional** and can be left empty if not used.
-- **`FREEMIUM_LIMIT`**: Default is `0`. Set this to any value you want to allow free users to extract content. If set to `0`, free users will not have access to any extraction features.
-- **`PREMIUM_LIMIT`**: Default is `500`. This is the batch limit for premium users. You can customize this to allow premium users to process more links/files in one batch.
-- **`YT_COOKIES`**: Yt cookies for downloading yt videos 
-- **`INSTA_COOKIES`**: If you want to enable instagram downloading fill cookiesn
-
-**How to get cookies ??** : use mozila firfox if on android or use chrome on desktop and download extension get this cookie or any Netscape Cookies (HTTP Cookies) extractor and use that 
-
-### Monetization (Optional):
-- **`WEBSITE_URL`**: (Optional) This is the domain for your monetization short link service. Provide the shortener's domain name, for example: `upshrink.com`. Do **not** include `www` or `https://`. The default link shortener is already set.
-- **`AD_API`**: (Optional) The API key from your link shortener service (e.g., **Upshrink**, **AdFly**, etc.) to monetize links. Enter the API provided by your shortener.
-
-> **Important:** Always keep your credentials secure! Never hard-code them in the repository. Use environment variables or a `.env` file.
-
-</details>
-
----
-
-## 🚀 Deployment Guide
-
-<details>
-<summary><b>Deploy on VPS</b></summary>
-
-1. Fork the repo.
-2. Update `config.py` with your values.
-3. Run the following:
-   ```bash
-   sudo apt update
-   sudo apt install ffmpeg git python3-pip
-   git clone your_repo_link
-   cd your_repo_name
-   pip3 install -r requirements.txt
-   python3 main.py
+1. **API id/hash:** https://my.telegram.org → *API development tools*.
+2. **Bot token:** create a bot with @BotFather, then send it `/start` once so it can message you.
+3. **Your user id:** e.g. from @userinfobot.
+4. **Session string:** log in with your account once:
+   ```sh
+   docker compose run --rm -it tgsaver python gen_session.py
    ```
+   (or locally: `pip install -r requirements.txt && python gen_session.py`).
+   It asks for your phone and the login code and prints the string. **Anyone
+   holding this string has full access to your Telegram account.** Keep it only in
+   Dokploy's Environment tab.
+5. Add to Dokploy's Environment tab:
+   `TG_API_ID`, `TG_API_HASH`, `TG_BOT_TOKEN`, `TG_SESSION_STRING`, `TG_OWNER_ID`.
 
-- To run the bot in the background:
-  ```bash
-  screen -S gagan
-  python3 main.py
-  ```
-  - Detach: `Ctrl + A`, then `Ctrl + D`
-  - To stop: `screen -r gagan` and `screen -S gagan -X quit`
+## Compose changes (Dokploy stack)
 
-</details>
+### 1. New service
 
-<details>
-<summary><b>Deploy on Heroku</b></summary>
+```yaml
+  # Telegram saver bot: downloads with your account into /data/telegram for rclone to ship.
+  tgsaver:
+    build: https://github.com/spideyonmoon/tgsaver.git#main
+    environment:
+      - API_ID=${TG_API_ID}
+      - API_HASH=${TG_API_HASH}
+      - BOT_TOKEN=${TG_BOT_TOKEN}
+      - SESSION_STRING=${TG_SESSION_STRING}
+      - OWNER_ID=${TG_OWNER_ID}
+      - DOWNLOAD_DIR=/data/telegram
+      - TZ=Asia/Dhaka
+    volumes:
+      - data:/data
+    depends_on:
+      - rclone
+    restart: unless-stopped
+```
 
-1. Fork and Star the repo.
-2. Click [![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy).
-3. Enter required variables and click deploy ✅.
+The container runs as `1000:1000` like the rest of the stack. It needs no ports
+because it polls Telegram. It also shows up in FileBrowser under `telegram/`.
 
-</details>
+Optional env: `DELAY_SECONDS` (pause between files, default `2`) and `MAX_BATCH`
+(default `2000`).
 
-<details>
-<summary><b>Deploy on Render</b></summary>
+### 2. rclone service: three small additions to its `command`
 
-1. Fork and star the repo.
-2. Edit `config.py` or set environment variables on Render.
-3. Go to [render.com](https://render.com), sign up/log in.
-4. Create a new web service, select the free plan.
-5. Connect your GitHub repo and deploy ✅.
+Create and own the folder (extend the existing `mkdir`/`chown` lines):
 
-</details>
+```sh
+        mkdir -p /data/torrents/manual /data/torrents/incomplete /data/zips/.done /data/zips/.done-aria2 /data/telegram
+        chown 1000:1000 /data/torrents /data/torrents/manual /data/torrents/incomplete /data/telegram
+```
 
-<details>
-<summary><b>Deploy on Koyeb</b></summary>
+Next to the other `rclone mkdir` lines:
 
-1. Fork and star the repo.
-2. Edit `config.py` or set environment variables on Koyeb.
-3. Create a new service, select `Dockerfile` as build type.
-4. Connect your GitHub repo and deploy ✅.
+```sh
+        rclone mkdir gdrive:Telegram
+```
 
-</details>
+Add this function, for example after `cleanup_aria2() { … }`:
 
----
-### ⚠️ Must Do: Secure Your Sensitive Variables
+```sh
+        # Move finished Telegram downloads to Drive, keeping the <chat title>/ folders.
+        # The bot only places complete files here (partials stay in the hidden .incomplete/),
+        # so they can go straight away. Local copies are deleted once uploaded.
+        ship_telegram() {
+          rclone move /data/telegram gdrive:Telegram \
+            --exclude ".incomplete/**" --min-age 1m --delete-empty-src-dirs \
+            --drive-chunk-size 64M -v
+        }
+```
 
-**Do not expose sensitive variables (e.g., `API_ID`, `API_HASH`, `BOT_TOKEN`) on GitHub. Use environment variables to keep them secure.**
+Then call it in the loop:
 
-### Configuring Variables Securely:
+```sh
+        while true; do
+          ship /data/torrents/manual gdrive:Manual
+          ship_aria2
+          ship_telegram
+          cleanup manual
+          cleanup_aria2
+          sleep 300
+        done
+```
 
-- **On VPS or Local Machine:**
-  - Use a text editor to edit `config.py`:
-    ```bash
-    nano config.py
-    ```
-  - Alternatively, export as environment variables:
-    ```bash
-    export API_ID=your_api_id
-    export API_HASH=your_api_hash
-    export BOT_TOKEN=your_bot_token
-    ```
+There's no `$` in these lines, so the compose `$$` escaping doesn't apply.
 
-- **For Cloud Platforms (Heroku, Railway, etc.):**
-  - Set environment variables directly in your platform’s dashboard.
+## Notes
 
-- **Using `.env` File:**
-  - Create a `.env` file and add your credentials:
-    ```
-    API_ID=your_api_id
-    API_HASH=your_api_hash
-    BOT_TOKEN=your_bot_token
-    ```
-  - Make sure to add `.env` to `.gitignore` to prevent it from being pushed to GitHub.
-
-**Why This is Important?**
-Your credentials can be stolen if pushed to a public repository. Always keep them secure by using environment variables or local configuration files.
-
----
-
-## 🛠️ Terms of Use
-
-Visit the [Terms of Use](https://github.com/devgaganin/Save-Restricted-Content-Bot-Repo/blob/master/TERMS_OF_USE.md) page to review and accept the guidelines.
-## Important Note
-
-**Note**: Changing the terms and commands doesn't magically make you a developer. Real development involves understanding the code, writing new functionalities, and debugging issues, not just renaming things. If only it were that easy!
-
-
-<h3 align="center">
-  Developed with ❤️ by <a href="https://t.me/restbots"> Gagan </a>
-</h3>
-
+- The account must be able to see the chat (be a member of private ones).
+- Telegram may throttle heavy downloading (FloodWait). The bot waits it out
+  automatically. Large batches are fine but not instant.
+- On restart, any partial file in `.incomplete/` is deleted and you resend that link.
