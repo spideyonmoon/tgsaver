@@ -68,6 +68,9 @@ INCOMPLETE_DIR = os.path.join(DOWNLOAD_DIR, ".incomplete")
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "2"))  # pause between files
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "2000"))
 EDIT_EVERY = 6  # seconds between progress edits (Telegram rate-limits edits)
+PARALLEL = max(1, int(os.environ.get("PARALLEL", "4")))  # connections per file; 1 = off
+PARALLEL_MIN_MB = 20  # smaller files use a single stream
+CHUNK = 1024 * 1024   # Telegram/pyrofork download chunk size
 
 # ── link parsing ────────────────────────────────────────────────────────────
 # t.me/c/<id>/<msg>, t.me/c/<id>/<topic>/<msg>, t.me/<user>/<msg>, t.me/<user>/<topic>/<msg>
@@ -198,8 +201,10 @@ class Saver:
     def __init__(self):
         self.bot = Client("tgsaver-bot", api_id=API_ID, api_hash=API_HASH,
                           bot_token=BOT_TOKEN, in_memory=True)
+        # pyrofork allows only one file transfer at a time unless told otherwise.
         self.user = Client("tgsaver-user", api_id=API_ID, api_hash=API_HASH,
-                           session_string=SESSION_STRING, in_memory=True)
+                           session_string=SESSION_STRING, in_memory=True,
+                           max_concurrent_transmissions=PARALLEL)
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
         self.current: Job | None = None
 
@@ -335,17 +340,30 @@ class Saver:
         started = time.monotonic()
         await edit(job, f"{pos}\n⬇️ {name}\n0 / {human(size)}", force=True)
 
-        async def progress(current, total):
-            if job.cancelled:
-                self.user.stop_transmission()
+        async def report(current, total):
             elapsed = max(time.monotonic() - started, 0.1)
             speed = current / elapsed
             left = (total - current) / speed if speed else 0
             await edit(job, f"{pos}\n⬇️ {name}\n{human(current)} / {human(total)} · "
                             f"{human(speed)}/s · ETA {eta(left)}")
 
+        async def progress(current, total):
+            if job.cancelled:
+                self.user.stop_transmission()
+            await report(current, total)
+
         os.makedirs(INCOMPLETE_DIR, exist_ok=True)
-        path = await with_floodwait(self.user.download_media, m, file_name=tmp_path, progress=progress)
+        path = None
+        if PARALLEL > 1 and size >= PARALLEL_MIN_MB * CHUNK:
+            if await self.parallel_download(job, m, size, tmp_path, report):
+                path = tmp_path
+            elif os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            if not path and not job.cancelled:
+                log.warning("parallel download of %s/%s failed, falling back to single stream",
+                            m.chat.id, m.id)
+        if not path and not job.cancelled:
+            path = await with_floodwait(self.user.download_media, m, file_name=tmp_path, progress=progress)
         if not path or job.cancelled:
             if path and os.path.exists(path):
                 os.remove(path)
@@ -363,6 +381,57 @@ class Saver:
             os.replace(path, final_path)
         log.info("saved %s", final_path)
         return True
+
+    async def parallel_download(self, job, m, size, path, report):
+        """Download one file as PARALLEL byte ranges at once, each over its own connection.
+
+        pyrofork fetches 1 MB per request and waits for each reply, so a single stream
+        is capped by round-trip time, not bandwidth. Each range here is still fetched
+        with pyrofork's own stream_media (same auth/CDN/FloodWait handling), written
+        straight into its place in a pre-sized file. True only if every byte arrived.
+        """
+        chunks = -(-size // CHUNK)
+        per = -(-chunks // min(PARALLEL, chunks))
+        ranges = [(start, min(per, chunks - start)) for start in range(0, chunks, per)]
+        done = [0] * len(ranges)  # chunks finished in each range
+        got = [0]                 # bytes written so far, for progress
+        current = [m]             # refreshed if the file reference goes stale
+
+        with open(path, "wb") as f:
+            f.truncate(size)
+
+        async def segment(i, start, count):
+            with open(path, "r+b") as f:
+                for attempt in range(6):
+                    remaining = count - done[i]
+                    if remaining <= 0 or job.cancelled:
+                        return
+                    f.seek((start + done[i]) * CHUNK)
+                    try:
+                        async for chunk in self.user.stream_media(
+                                current[0], offset=start + done[i], limit=remaining):
+                            if job.cancelled:
+                                return
+                            f.write(chunk)
+                            done[i] += 1
+                            got[0] += len(chunk)
+                            await report(got[0], size)
+                    except FloodWait as e:
+                        log.warning("FloodWait %ss on range %s", e.value, i)
+                        await asyncio.sleep(e.value + 1)
+                        continue
+                    if done[i] < count:
+                        # pyrofork logs network errors and just ends the stream; retry the rest.
+                        log.warning("range %s of %s/%s stopped at %s/%s, retrying",
+                                    i, m.chat.id, m.id, done[i], count)
+                        await asyncio.sleep(2 * (attempt + 1))
+                        try:
+                            current[0] = await self.user.get_messages(m.chat.id, m.id)
+                        except Exception as e:
+                            log.warning("refetching message failed: %s", e)
+
+        await asyncio.gather(*(segment(i, s, c) for i, (s, c) in enumerate(ranges)))
+        return not job.cancelled and all(done[i] == c for i, (_, c) in enumerate(ranges))
 
     async def prepare_dirs(self):
         # The rclone container creates /data/telegram owned by 1000:1000; wait for it if needed.

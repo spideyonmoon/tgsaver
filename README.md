@@ -75,8 +75,13 @@ Only the IDs in `TG_OWNER_ID` can use the bot. Everyone else is ignored.
 The container runs as `1000:1000` like the rest of the stack. It needs no ports
 because it polls Telegram. It also shows up in FileBrowser under `telegram/`.
 
-Optional env: `DELAY_SECONDS` (pause between files, default `2`) and `MAX_BATCH`
-(default `2000`).
+Optional env:
+- `PARALLEL`: connections per file, default `4`. Files of 20 MB or more are
+  split into that many byte ranges downloaded at once. A single stream is capped
+  by round-trip time (~3–4 MB/s), so this is the speed knob. `1` turns it off.
+  Going past ~8 makes Telegram more likely to slow you down.
+- `DELAY_SECONDS`: pause between files, default `2`.
+- `MAX_BATCH`: most posts per job, default `2000`.
 
 ### 2. rclone service: three small additions to its `command`
 
