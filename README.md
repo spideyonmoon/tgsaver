@@ -79,7 +79,9 @@ Optional env:
 - `PARALLEL`: connections per file, default `4`. Files of 20 MB or more are
   split into that many byte ranges downloaded at once. A single stream is capped
   by round-trip time (~3–4 MB/s), so this is the speed knob. `1` turns it off.
-  Going past ~8 makes Telegram more likely to slow you down.
+  Going past ~8 makes Telegram more likely to slow you down. If Telegram ever says
+  "wait" (FloodWait), every request pauses for the full time, and the connection count
+  halves (4 → 2 → 1) until the container restarts. `/status` shows the current value.
 - `DELAY_SECONDS`: pause between files, default `2`.
 - `MAX_BATCH`: most posts per job, default `2000`.
 

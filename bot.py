@@ -186,13 +186,37 @@ async def edit(job, text, force=False):
         log.warning("status edit failed: %s", e)
 
 
-async def with_floodwait(fn, *args, **kwargs):
+# One shared cooldown for the user account: when Telegram says "wait N seconds" to any
+# request, every request (all connections, the next file, the next batch) waits it out.
+# pyrofork already sleeps through waits of <=30s inside a request; longer ones land here.
+FLOOD_UNTIL = [0.0]
+
+
+async def respect_flood():
+    delay = FLOOD_UNTIL[0] - time.monotonic()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+async def flood_wait(seconds, job=None, where=""):
+    until = time.monotonic() + seconds + 1
+    if until > FLOOD_UNTIL[0]:
+        FLOOD_UNTIL[0] = until
+        log.warning("FloodWait %ss (%s)", seconds, where)
+        if job:
+            await edit(job, f"Telegram asked to slow down; pausing {eta(seconds)}, then continuing.",
+                       force=True)
+    await respect_flood()
+
+
+async def with_floodwait(fn, *args, _job=None, **kwargs):
     for _ in range(5):
+        await respect_flood()
         try:
             return await fn(*args, **kwargs)
         except FloodWait as e:
-            log.warning("FloodWait %ss", e.value)
-            await asyncio.sleep(e.value + 1)
+            await flood_wait(e.value, _job, getattr(fn, "__name__", "request"))
+    await respect_flood()
     return await fn(*args, **kwargs)
 
 
@@ -207,6 +231,7 @@ class Saver:
                            max_concurrent_transmissions=PARALLEL)
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
         self.current: Job | None = None
+        self.parallel = PARALLEL  # halved after each FloodWait during a parallel download
 
         owner = filters.private & filters.user(list(OWNER_IDS))
         self.bot.add_handler(MessageHandler(self.on_start, owner & filters.command(["start", "help"])))
@@ -222,6 +247,7 @@ class Saver:
         job = self.current
         busy = f"Working on {job.total} message(s) from {job.chat_ref}" if job else "Idle"
         await m.reply_text(f"{busy}\nQueued jobs: {self.queue.qsize()}\n"
+                           f"Connections per file: {self.parallel} (of {PARALLEL})\n"
                            f"Free disk: {human(shutil.disk_usage(DOWNLOAD_DIR).free)}")
 
     async def on_cancel(self, _, m: Message):
@@ -300,7 +326,7 @@ class Saver:
         for start in range(0, len(ids), 100):
             if job.cancelled:
                 break
-            msgs = await with_floodwait(self.user.get_messages, chat.id, ids[start:start + 100])
+            msgs = await with_floodwait(self.user.get_messages, chat.id, ids[start:start + 100], _job=job)
             for m in msgs if isinstance(msgs, list) else [msgs]:
                 if job.cancelled:
                     break
@@ -322,6 +348,7 @@ class Saver:
                 else:
                     failed += 1
                 await asyncio.sleep(DELAY_SECONDS)
+                await respect_flood()
 
         head = "Cancelled" if job.cancelled else "Done"
         await edit(job, f"{head}: {title}\nSaved {saved} · skipped {skipped} (no media/exists) · failed {failed}\n"
@@ -354,7 +381,7 @@ class Saver:
 
         os.makedirs(INCOMPLETE_DIR, exist_ok=True)
         path = None
-        if PARALLEL > 1 and size >= PARALLEL_MIN_MB * CHUNK:
+        if self.parallel > 1 and size >= PARALLEL_MIN_MB * CHUNK:
             if await self.parallel_download(job, m, size, tmp_path, report):
                 path = tmp_path
             elif os.path.exists(tmp_path):
@@ -363,7 +390,8 @@ class Saver:
                 log.warning("parallel download of %s/%s failed, falling back to single stream",
                             m.chat.id, m.id)
         if not path and not job.cancelled:
-            path = await with_floodwait(self.user.download_media, m, file_name=tmp_path, progress=progress)
+            path = await with_floodwait(self.user.download_media, m, file_name=tmp_path,
+                                        progress=progress, _job=job)
         if not path or job.cancelled:
             if path and os.path.exists(path):
                 os.remove(path)
@@ -383,7 +411,7 @@ class Saver:
         return True
 
     async def parallel_download(self, job, m, size, path, report):
-        """Download one file as PARALLEL byte ranges at once, each over its own connection.
+        """Download one file as self.parallel byte ranges at once, each over its own connection.
 
         pyrofork fetches 1 MB per request and waits for each reply, so a single stream
         is capped by round-trip time, not bandwidth. Each range here is still fetched
@@ -391,7 +419,7 @@ class Saver:
         straight into its place in a pre-sized file. True only if every byte arrived.
         """
         chunks = -(-size // CHUNK)
-        per = -(-chunks // min(PARALLEL, chunks))
+        per = -(-chunks // min(self.parallel, chunks))
         ranges = [(start, min(per, chunks - start)) for start in range(0, chunks, per)]
         done = [0] * len(ranges)  # chunks finished in each range
         got = [0]                 # bytes written so far, for progress
@@ -406,6 +434,7 @@ class Saver:
                     remaining = count - done[i]
                     if remaining <= 0 or job.cancelled:
                         return
+                    await respect_flood()
                     f.seek((start + done[i]) * CHUNK)
                     try:
                         async for chunk in self.user.stream_media(
@@ -417,8 +446,11 @@ class Saver:
                             got[0] += len(chunk)
                             await report(got[0], size)
                     except FloodWait as e:
-                        log.warning("FloodWait %ss on range %s", e.value, i)
-                        await asyncio.sleep(e.value + 1)
+                        if self.parallel > 1:
+                            self.parallel = max(1, self.parallel // 2)
+                            log.warning("FloodWait during parallel download: next files use %s connection(s)",
+                                        self.parallel)
+                        await flood_wait(e.value, job, f"range {i}")
                         continue
                     if done[i] < count:
                         # pyrofork logs network errors and just ends the stream; retry the rest.
