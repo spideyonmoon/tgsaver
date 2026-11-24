@@ -133,6 +133,10 @@ DEFAULT_EXT = {
 }
 
 
+# wzgram names unnamed videos "video_<download time>.mp4", which says nothing useful.
+INVENTED_NAME = re.compile(r"^video_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+
+
 def sanitize(name, limit=150):
     name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
@@ -151,6 +155,8 @@ def file_name_for(m, kind, media):
     """'<msg id> - <original name or first caption line><ext>' so files sort in post order."""
     original = getattr(media, "file_name", None) or ""
     stem, ext = os.path.splitext(original)
+    if INVENTED_NAME.match(stem):  # wzgram's placeholder for unnamed videos; prefer the caption
+        stem = ""
     if not ext:
         mime = getattr(media, "mime_type", None)
         ext = (mimetypes.guess_extension(mime) if mime else None) or DEFAULT_EXT[kind]
