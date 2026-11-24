@@ -250,18 +250,20 @@ class Saver:
             await self.queue.put(job)
 
     # ── work ──
-    async def warm_dialogs(self):
-        # A session string starts with an empty peer cache; walking the dialogs fills it
-        # so private chat IDs from links can be resolved.
-        async for _ in self.user.get_dialogs():
-            pass
-
-    async def resolve(self, ref):
+    async def resolve(self, ref, job=None):
         try:
             return await self.user.get_chat(ref)
         except (RPCError, KeyError, ValueError):
-            await self.warm_dialogs()
-            return await self.user.get_chat(ref)
+            pass
+        # A session string starts with an empty peer cache, so a private chat ID from a
+        # link is unknown until we've seen it in the dialog list. Walk the dialogs (most
+        # recent first) and stop as soon as the chat turns up; it stays cached afterwards.
+        if job:
+            await edit(job, "Looking up the chat in your dialogs…", force=True)
+        async for dialog in self.user.get_dialogs():
+            if dialog.chat.id == ref or (dialog.chat.username or "").lower() == str(ref).lower():
+                break
+        return await self.user.get_chat(ref)
 
     async def worker(self):
         while True:
@@ -280,7 +282,7 @@ class Saver:
 
     async def run(self, job: Job):
         try:
-            chat = await self.resolve(job.chat_ref)
+            chat = await self.resolve(job.chat_ref, job)
         except Exception as e:
             await edit(job, f"Can't open that chat with your account ({type(e).__name__}). "
                             "Is the account a member?", force=True)
@@ -379,7 +381,6 @@ class Saver:
         await self.user.start()
         me = await self.user.get_me()
         log.info("user client: %s (%s)", me.first_name, me.id)
-        await self.warm_dialogs()
         await self.bot.start()
         asyncio.create_task(self.worker())
         for owner in OWNER_IDS:
