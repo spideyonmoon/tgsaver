@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from pyrogram import Client, filters, idle
 from pyrogram.errors import Flood, MessageNotModified, RPCError
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message
+from pyrogram.enums import ParseMode
+from pyrogram.types import BotCommand, Message
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
@@ -74,6 +75,41 @@ EDIT_EVERY = 6  # seconds between progress edits (Telegram rate-limits edits)
 # Its own default is 6 x 4 = 24 with no pacing; start gentler. Override in the compose env.
 os.environ.setdefault("WZGRAM_DL_POOL_PREMIUM", "4")
 os.environ.setdefault("WZGRAM_DL_WORKERS_PREMIUM", "2")
+
+HELP_TEXT = """<b>tgsaver</b>: saves Telegram videos to your Drive.
+Send a post link (right-click/long-press a post → Copy Post Link):
+
+<b>One post</b>
+<code>https://t.me/c/1234567890/45</code>
+
+<b>A number of posts from there</b> (45 to 64)
+<code>https://t.me/c/1234567890/45 20</code>
+
+<b>A range</b> (45 to 80)
+<code>https://t.me/c/1234567890/45 https://t.me/c/1234567890/80</code>
+
+<b>A whole channel</b>: post 1 to the newest post
+<code>https://t.me/c/1234567890/1 https://t.me/c/1234567890/1530</code>
+At most {max_batch} posts per job; split bigger ranges into one line each.
+
+Several lines in one message run one after another. Public channel and topic links work too.
+
+<b>Commands</b>
+/status: what's running, the queue, download pool, free disk
+/cancel: stop the current download now and clear the queue
+/help: this message
+
+<b>Good to know</b>
+• Posts without media are skipped.
+• Files are named <code>post id - caption first line</code> and land in Drive → Telegram → channel name within about 5 minutes.
+• Files already moved to Drive download again if you resend their links, so resend from the post after the last one saved.
+• If Telegram throttles downloads, the bot shrinks its download pool by itself (now {pool} × {workers}) and tells you."""
+
+BOT_COMMANDS = [
+    BotCommand("help", "How to send links"),
+    BotCommand("status", "Current job, queue, pool, free disk"),
+    BotCommand("cancel", "Stop the current download and clear the queue"),
+]
 
 # ── link parsing ────────────────────────────────────────────────────────────
 # t.me/c/<id>/<msg>, t.me/c/<id>/<topic>/<msg>, t.me/<user>/<msg>, t.me/<user>/<topic>/<msg>
@@ -294,7 +330,9 @@ class Saver:
 
     # ── handlers ──
     async def on_start(self, _, m: Message):
-        await m.reply_text(__doc__.split("\n", 2)[2].strip(), disable_web_page_preview=True)
+        pool, workers = pool_setting()
+        await m.reply_text(HELP_TEXT.format(pool=pool, workers=workers, max_batch=MAX_BATCH),
+                           parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
     async def on_status(self, _, m: Message):
         job = self.current
@@ -495,10 +533,14 @@ class Saver:
         me = await self.user.get_me()
         log.info("user client: %s (%s)", me.first_name, me.id)
         await self.bot.start()
+        try:  # shows /help, /status, /cancel in Telegram's "/" menu
+            await self.bot.set_bot_commands(BOT_COMMANDS)
+        except RPCError as e:
+            log.warning("couldn't set the bot's command menu: %s", e)
         asyncio.create_task(self.worker())
         for owner in OWNER_IDS:
             try:
-                await self.bot.send_message(owner, "tgsaver is up. Send a link.")
+                await self.bot.send_message(owner, "tgsaver is up. Send a link, or /help for how.")
             except RPCError:
                 log.warning("can't message owner %s yet (send the bot /start once)", owner)
         log.info("ready")
