@@ -81,8 +81,12 @@ Optional env:
   fork, pinned in `requirements.txt`). It splits each file across a pool of reused
   media connections, each with several requests in flight. wzgram's own default is
   6 × 4 with no pacing, which is more likely to make Telegram slow you down. Raise
-  these slowly. If Telegram ever says "wait" (FloodWait), every request pauses for the
-  full time, and the status message says so.
+  these slowly. wzgram quietly sleeps through short waits from Telegram. If 5 or more
+  of those happen during one file, the bot shrinks the pool for the next files
+  (4×2 → 2×2 → 1×2 → 1×1) and says so in the status message. It stays there until
+  the container restarts. Longer waits (FloodWait) pause every request for the full
+  time. `/status` shows the current pool. `/cancel` stops a download at once, even
+  in the middle of a wait.
 - `DELAY_SECONDS`: pause between files, default `2`.
 - `MAX_BATCH`: most posts per job, default `2000`.
 

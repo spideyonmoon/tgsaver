@@ -74,7 +74,6 @@ EDIT_EVERY = 6  # seconds between progress edits (Telegram rate-limits edits)
 # Its own default is 6 x 4 = 24 with no pacing; start gentler. Override in the compose env.
 os.environ.setdefault("WZGRAM_DL_POOL_PREMIUM", "4")
 os.environ.setdefault("WZGRAM_DL_WORKERS_PREMIUM", "2")
-DL_POOL = f"{os.environ['WZGRAM_DL_POOL_PREMIUM']} x {os.environ['WZGRAM_DL_WORKERS_PREMIUM']}"
 
 # ── link parsing ────────────────────────────────────────────────────────────
 # t.me/c/<id>/<msg>, t.me/c/<id>/<topic>/<msg>, t.me/<user>/<msg>, t.me/<user>/<topic>/<msg>
@@ -91,6 +90,7 @@ class Job:
     status: Message = None
     cancelled: bool = False
     last_edit: float = field(default=0.0)
+    download_task: object = None  # the running download, so /cancel can stop it
 
     @property
     def total(self):
@@ -222,12 +222,58 @@ async def flood_wait(seconds, job=None, where=""):
 async def with_floodwait(fn, *args, _job=None, **kwargs):
     for _ in range(5):
         await respect_flood()
+        if _job is not None and _job.cancelled:
+            return None  # never start the request over after /cancel
         try:
             return await fn(*args, **kwargs)
         except Flood as e:
             await flood_wait(e.value, _job, getattr(fn, "__name__", "request"))
     await respect_flood()
+    if _job is not None and _job.cancelled:
+        return None
     return await fn(*args, **kwargs)
+
+
+# wzgram sleeps through short download waits (<=30s) itself and only logs them, so watch
+# its log for those and turn the download pool down when they pile up.
+WAIT_RE = re.compile(r'Waiting for \d+ seconds .*"upload\.GetFile"')
+THROTTLE_AFTER = 5  # this many short waits during one file -> smaller pool from the next file
+
+
+class WaitCounter(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.count = 0
+
+    def emit(self, record):
+        try:
+            if WAIT_RE.search(record.getMessage()):
+                self.count += 1
+        except Exception:
+            pass
+
+
+WAITS = WaitCounter()
+logging.getLogger("pyrogram").addHandler(WAITS)
+
+
+def pool_setting():
+    return int(os.environ["WZGRAM_DL_POOL_PREMIUM"]), int(os.environ["WZGRAM_DL_WORKERS_PREMIUM"])
+
+
+def step_down_pool():
+    """Halve connections first, then requests per connection. False if already at 1 x 1.
+    wzgram reads these at the start of every download, so the next file uses them."""
+    pool, workers = pool_setting()
+    if pool > 1:
+        pool //= 2
+    elif workers > 1:
+        workers //= 2
+    else:
+        return False
+    os.environ["WZGRAM_DL_POOL_PREMIUM"] = str(pool)
+    os.environ["WZGRAM_DL_WORKERS_PREMIUM"] = str(workers)
+    return True
 
 
 # ── the app ─────────────────────────────────────────────────────────────────
@@ -254,7 +300,7 @@ class Saver:
         job = self.current
         busy = f"Working on {job.total} message(s) from {job.chat_ref}" if job else "Idle"
         await m.reply_text(f"{busy}\nQueued jobs: {self.queue.qsize()}\n"
-                           f"Download pool: {DL_POOL} (connections x requests)\n"
+                           f"Download pool: {' x '.join(map(str, pool_setting()))} (connections x requests)\n"
                            f"Free disk: {human(shutil.disk_usage(DOWNLOAD_DIR).free)}")
 
     async def on_cancel(self, _, m: Message):
@@ -265,6 +311,8 @@ class Saver:
             dropped += 1
         if self.current:
             self.current.cancelled = True
+            if self.current.download_task:
+                self.current.download_task.cancel()  # stop the transfer now, mid-wait or not
         await m.reply_text(f"Cancelling current job{' and ' + str(dropped) + ' queued' if dropped else ''}.")
 
     async def on_text(self, _, m: Message):
@@ -384,9 +432,27 @@ class Saver:
                             f"{human(speed)}/s · ETA {eta(left)}")
 
         os.makedirs(INCOMPLETE_DIR, exist_ok=True)
-        # wzgram spreads the file across its pool of media connections by itself.
-        path = await with_floodwait(self.user.download_media, m, file_name=tmp_path,
-                                    progress=progress, _job=job)
+        waits_before = WAITS.count
+        # wzgram spreads the file across its pool of media connections by itself. It runs as
+        # its own task so /cancel can stop it at once; wzgram only calls `progress` when a
+        # chunk lands, so while its requests sit in Telegram's waits a flag alone isn't seen.
+        task = asyncio.ensure_future(with_floodwait(
+            self.user.download_media, m, file_name=tmp_path, progress=progress, _job=job))
+        job.download_task = task
+        try:
+            path = await task
+        except asyncio.CancelledError:
+            if not job.cancelled:
+                raise  # the bot is shutting down, not a /cancel
+            path = None
+        finally:
+            job.download_task = None
+            waits = WAITS.count - waits_before
+            if waits >= THROTTLE_AFTER and step_down_pool():
+                pool, workers = pool_setting()
+                log.warning("%s download waits on one file; pool now %s x %s", waits, pool, workers)
+                await edit(job, f"Telegram is throttling downloads ({waits} waits on that file). "
+                                f"Next files use a smaller pool: {pool} x {workers}.", force=True)
         if not path or job.cancelled:
             if path and os.path.exists(path):
                 os.remove(path)
